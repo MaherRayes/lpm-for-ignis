@@ -9,26 +9,44 @@ The Ignis verison used is from 11 December 2022.
 Following files were changed to accommodate the new algorithm:
 
 modified:   ../../../../src/artic/driver/driver.art
+
 modified:   ../../../../src/artic/driver/light.art
+
 modified:   ../../../../src/artic/light/area.art
+
 modified:   ../../../../src/artic/light/directional.art
+
 modified:   ../../../../src/artic/light/env.art
+
 modified:   ../../../../src/artic/light/light_selector.art
+
 modified:   ../../../../src/artic/light/point.art
+
 modified:   ../../../../src/artic/light/spot.art
+
 modified:   ../../../../src/artic/light/sun.art
+
 modified:   ../../../../src/runtime/device/Device.cpp
+
 modified:   ../../../../src/runtime/light/AreaLight.cpp
+
 modified:   ../../../../src/runtime/loader/LoaderLight.cpp
+
 modified:   ../../../../src/runtime/loader/LoaderLight.h
+
 modified:   ../../../../src/runtime/loader/LoaderTechnique.cpp
+
 modified:   ../../../../src/runtime/loader/LoaderTechnique.h
+
 
 Followin files were added to the project:
 
 ../../../../src/artic/core/histogram.art
+
 ../../../../src/artic/technique/lightphotonmapper.art
+
 ../../../../src/runtime/technique/LightPhotonMappingTechnique.cpp
+
 ../../../../src/runtime/technique/LightPhotonMappingTechnique.h
 
 
