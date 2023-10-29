@@ -1,6 +1,6 @@
 # Lightweight Photon mapping for Ignis
 
-This is an implementation of Multiple Importance Sampling and the paper [Lightweight Photon Mapping](https://cgg.mff.cuni.cz/~jaroslav/papers/2018-lwpm/index.htm) for [Ignis](https://github.com/PearCoding/Ignis). The implementation uses histogram as data structure for the area lights.
+This is an implementation of Multiple Importance Sampling and the paper [Lightweight Photon Mapping](https://cgg.mff.cuni.cz/~jaroslav/papers/2018-lwpm/index.htm) for [Ignis](https://github.com/PearCoding/Ignis). The implementation uses histogram as a data structure for the area lights.
 
 The Ignis verison used is from 11 December 2022. 
 
@@ -39,7 +39,7 @@ modified:   ../../../../src/runtime/loader/LoaderTechnique.cpp
 modified:   ../../../../src/runtime/loader/LoaderTechnique.h
 
 
-Followin files were added to the project:
+Following files were added to the project:
 
 ../../../../src/artic/core/histogram.art
 
