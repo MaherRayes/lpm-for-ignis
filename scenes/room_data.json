@@ -1,0 +1,11 @@
+{
+	"externals": [
+		{"filename": "room_no_window_data.json"}
+	],
+	"shapes": [
+		{"type":"obj", "name":"Window", "filename":"meshes/RoomWindow.obj"}
+	],
+	"entities": [
+		{"name":"Window","shape":"Window", "bsdf":"window"}
+	]
+}

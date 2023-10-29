@@ -1,0 +1,313 @@
+
+mod histogram {
+use super as all;
+use super::math_builtins;
+use super::interval;
+
+type Vec2 = all::Vec2;
+type Device = all::Device;
+
+struct DiscreteSample1d {
+    off: i32,
+    pdf: f32
+}
+
+struct ContinousSample1d {
+    off: i32,
+    rem: f32,
+    pos: f32,
+    pdf: f32
+}
+
+struct DiscretePdf1d {
+    pdf: f32
+}
+
+struct ContinousPdf1d {
+    off: i32,
+    pdf: f32
+}
+
+struct Histo1D {
+    func_size:        i32,
+    sample_discrete:  fn (f32) -> DiscreteSample1d,
+    pdf_discrete:     fn (i32) -> DiscretePdf1d,
+}
+
+fn @get_histo_1D_weights_buffer(device: Device, finite_lights_count: i32) = device.request_buffer("__histo_1d_weights", finite_lights_count, 0);
+fn @get_histo_1D_cdf_buffer(device: Device, finite_lights_count: i32) = device.request_buffer("__histo_1d_cdf", finite_lights_count, 0);
+
+// Creates a histogram with func_size + 1 entries accessed by the get function
+fn @make_histo_1d(device: Device, func_size: i32) -> Histo1D {
+
+    //Make buffers for weights and cdf results
+    let histo_1D_weights_buffer = get_histo_1D_weights_buffer(device, func_size);
+    let histo_1D_cdf_buffer = get_histo_1D_cdf_buffer(device, func_size);
+
+    //initialize weights and cdf
+    for i in device.parallel_range(0, func_size){
+        histo_1D_weights_buffer.store_f32(i, 0.0 as f32);
+    }
+    device.sync();
+
+    for i in device.parallel_range(0, func_size){
+        histo_1D_cdf_buffer.store_f32(i, (i + 1) as f32 / func_size as f32);
+    }
+    device.sync();
+
+    let inv_norm = 1 as f32;
+
+    //Histo1D {
+    //    func_size        = func_size,
+    //    sample_discrete  = @|u:f32| DiscreteSample1d { off = func_size - 1, pdf = 0 },
+    //    pdf_discrete     = @|x:i32| DiscretePdf1d { pdf = 0 },
+    //}
+
+    //Define the functions to get pdf and sample
+    let pdf_discrete = @|x:i32| DiscretePdf1d {pdf = 1.0 / func_size as f32};
+    let sample_discrete = @|u:f32| {
+        let off = all::min(interval::binary_search(func_size, @|i:i32| histo_1D_cdf_buffer.load_f32(i) <= u), func_size - 1);
+        DiscreteSample1d{ off = off, pdf = pdf_discrete(off).pdf}
+    };
+
+    Histo1D {
+        func_size        = func_size,
+        sample_discrete  = sample_discrete,
+        pdf_discrete     = pdf_discrete,
+    }
+}
+
+fn @normalize_histo_1d(device: Device, func_size: i32) -> Histo1D {
+
+    //Get buffers for weights and cdf results
+    let histo_1D_weights_buffer = get_histo_1D_weights_buffer(device, func_size);
+    let histo_1D_cdf_buffer = get_histo_1D_cdf_buffer(device, func_size);
+
+    //Compute inverse normalization from the updated weights
+    let mut sum = 0.0 as f32;
+    let mut i = 0;
+    while i < func_size {
+        sum += all::bitcast[f32](histo_1D_weights_buffer.load_i32_host(i));
+        i++;
+    } 
+    
+    //let abc = sum;
+    //let mut asd = "";
+    //all::print_string(all::float_to_string(asd, sum)); all::print_flush(); all::print_string("test2\n");all::print_flush();
+
+    let inv_norm = 1.0 as f32/ sum;
+
+    //Compute CDF
+    i = 0;
+    sum = 0.0 as f32;
+    while i < func_size {
+        sum += all::bitcast[f32](histo_1D_weights_buffer.load_i32_host(i)) * inv_norm;
+        histo_1D_cdf_buffer.store_i32_host(i, all::bitcast[i32](sum));
+        i++;
+    }
+
+    //Define the functions to get pdf and sample
+    let pdf_discrete = @|x:i32| DiscretePdf1d {pdf = inv_norm * histo_1D_weights_buffer.load_f32(x)};
+    let sample_discrete = @|u:f32| {
+        let off = all::min(interval::binary_search(func_size, @|i:i32| histo_1D_cdf_buffer.load_f32(i) <= u), func_size - 1);
+        DiscreteSample1d{ off = off, pdf = pdf_discrete(off).pdf}
+    };
+
+    Histo1D {
+        func_size        = func_size,
+        sample_discrete  = sample_discrete,
+        pdf_discrete     = pdf_discrete,
+    }
+}
+
+struct DiscreteSample4d {
+    pos: Vec2,
+    dir: Vec2,
+    pdf: f32,
+    pos_bin:Vec2,
+    dir_bin:Vec2
+}
+
+
+struct Histo4D {
+    func_size:        i32,
+    sample_discrete:  fn (i32, f32, Vec2, Vec2) -> DiscreteSample4d
+}
+
+//#[import(cc = "C")] fn strcat (&[u8],&[u8]) -> &[u8];
+//#[import(cc = "C")] fn int_to_string (i32) -> &[u8];
+
+
+fn @get_histo_4D_info(device: Device, nlights: i32) = device.request_buffer("__histo_4d_info", 7 * nlights, 0);
+fn @get_histo_4D_weights_buffer(device: Device, nlights: i32, bins: i32) = device.request_buffer("__histo_4d_weights", bins * nlights, 0);
+fn @get_histo_4D_cdf_buffer(device: Device, nlights: i32, bins: i32) = device.request_buffer("__histo_4d_cdf", (bins + 1) * nlights, 0);
+fn @get_histo_4D_pos_marginal_buffer(device: Device, nlights: i32, bins: i32) = device.request_buffer("__histo_4d_pos_marginal", bins * nlights, 0);
+fn @get_histo_4D_dir_marginal_buffer(device: Device, nlights: i32, bins: i32) = device.request_buffer("__histo_4d_dir_marginal", bins * nlights, 0);
+
+fn @make_histo_4d(device: Device, nlights: i32, res_u_pos: i32, res_v_pos: i32, res_u_dir: i32, res_v_dir: i32) -> Histo4D {
+
+    //all::print_string(int_to_string(1)); all::print_flush(); all::print_string("test2\n");all::print_flush();
+
+    let full_res = res_u_pos * res_v_pos * res_u_dir * res_v_dir;
+    let pos_res = res_u_pos * res_v_pos;
+    let dir_res = res_u_dir * res_v_dir;
+    let inv_res_u_pos = 1.0 as f32 / res_u_pos as f32;
+    let inv_res_v_pos = 1.0 as f32 / res_v_pos as f32;
+    let inv_res_u_dir = 1.0 as f32 / res_u_dir as f32;
+    let inv_res_v_dir = 1.0 as f32 / res_v_dir as f32;
+
+    let histo_4D_info = get_histo_4D_info(device, nlights);
+    let histo_4D_weights_buffer = get_histo_4D_weights_buffer(device, nlights, full_res);
+    let histo_4D_cdf_buffer = get_histo_4D_cdf_buffer(device, nlights, full_res);
+    let histo_4D_pos_marginal_buffer = get_histo_4D_pos_marginal_buffer(device, nlights, pos_res);
+    let histo_4D_dir_marginal_buffer = get_histo_4D_dir_marginal_buffer(device, nlights, dir_res);
+
+    //save all lights information (res_u_pos, res_v_pos, res_u_dir, res_v_dir, full_res, pos_res, dir_res)
+    for i in device.parallel_range(0, nlights){
+        histo_4D_info.store_i32((i*7) + 0, res_u_pos);
+        histo_4D_info.store_i32((i*7) + 1, res_v_pos);
+        histo_4D_info.store_i32((i*7) + 2, res_u_dir);
+        histo_4D_info.store_i32((i*7) + 3, res_v_dir);
+        histo_4D_info.store_i32((i*7) + 4, full_res);
+        histo_4D_info.store_i32((i*7) + 5, pos_res);
+        histo_4D_info.store_i32((i*7) + 6, dir_res);
+    }
+    device.sync();
+
+    //initialize weights
+    for i in device.parallel_range(0, full_res * nlights){
+        histo_4D_weights_buffer.store_f32(i, 1.0 as f32 / full_res as f32);
+    }
+    device.sync();
+
+    //initialize cdf
+    for i in device.parallel_range(0, (full_res + 1) * nlights){
+        let value = if (i % (full_res + 1)) == 0 {1 as f32} else {(i % (full_res + 1)) as f32/(full_res + 1) as f32} ;
+        histo_4D_cdf_buffer.store_f32(i, value);
+    }
+    device.sync();
+
+    //initialize pos_marginal and dir_marginal
+    for i in device.parallel_range(0, pos_res * nlights){
+        histo_4D_pos_marginal_buffer.store_f32(i, 0.0 as f32);
+    }
+    device.sync();
+    for i in device.parallel_range(0, dir_res * nlights){
+        histo_4D_dir_marginal_buffer.store_f32(i, 0.0 as f32);
+    }
+    device.sync();
+
+    let coord = @|bin_idx: i32| -> (Vec2, Vec2){
+
+        let mut bin_id = bin_idx;
+
+        let dir_u_bin = bin_id % res_u_dir;
+        bin_id /= res_u_dir;
+        let dir_v_bin = bin_id % res_v_dir;
+        bin_id /= res_v_dir;
+
+        let pos_u_bin = bin_id % res_u_pos;
+        let pos_v_bin = bin_id / res_v_pos;
+
+        (all::make_vec2(pos_u_bin as f32, pos_v_bin as f32), all::make_vec2(dir_u_bin as f32, dir_v_bin as f32))
+    };
+
+
+    let sample_discrete = @|id:i32, u:f32, p:Vec2, d:Vec2| {
+        let off = all::min(interval::binary_search(full_res, @|i:i32| histo_4D_cdf_buffer.load_f32((id * full_res) + i) <= u), full_res - 1);
+        let pdf = histo_4D_cdf_buffer.load_f32((id * (full_res + 1)) + full_res) * histo_4D_weights_buffer.load_f32((id * full_res) + off) * full_res as f32;
+        let (pos_bin, dir_bin) = coord(off);
+
+        //let pos_min = Vec2{ x = pos_bin.x / res_u_pos as f32, y = pos_bin.y / res_v_pos as f32};
+        //let dir_min = Vec2{ x = dir_bin.x / res_u_dir as f32, y = dir_bin.y / res_v_dir as f32};
+
+        DiscreteSample4d{
+            pos = all::make_vec2(pos_bin.x + p.x * inv_res_u_pos, pos_bin.y + p.y * inv_res_v_pos),
+            dir = all::make_vec2(dir_bin.x + d.x * inv_res_u_dir, dir_bin.y + d.y * inv_res_v_dir),
+            pdf = pdf,
+            pos_bin = pos_bin,
+            dir_bin = dir_bin
+        }
+    };
+
+    Histo4D{
+        func_size = full_res,
+        sample_discrete = sample_discrete
+    }
+
+}
+
+
+fn @normalize_histo_4d(device: Device, id: i32, res_u_pos: i32, res_v_pos: i32, res_u_dir: i32, res_v_dir: i32) -> Histo4D {
+    
+    let full_res = res_u_pos * res_v_pos * res_u_dir * res_v_dir;
+    let pos_res = res_u_pos * res_v_pos;
+    let dir_res = res_u_dir * res_v_dir;
+    let inv_res_u_pos = 1.0 as f32 / res_u_pos as f32;
+    let inv_res_v_pos = 1.0 as f32 / res_v_pos as f32;
+    let inv_res_u_dir = 1.0 as f32 / res_u_dir as f32;
+    let inv_res_v_dir = 1.0 as f32 / res_v_dir as f32;
+
+    let histo_4D_weights_buffer = get_histo_4D_weights_buffer(device, id, full_res);
+    let histo_4D_cdf_buffer = get_histo_4D_cdf_buffer(device, id, full_res);
+    let histo_4D_pos_marginal_buffer = get_histo_4D_pos_marginal_buffer(device, id, pos_res);
+    let histo_4D_dir_marginal_buffer = get_histo_4D_dir_marginal_buffer(device, id, dir_res);
+
+    //Compute inverse normalization from the updated weights
+    let mut sum = 0.0 as f32;
+    let mut i = 0;
+    while i < full_res {
+        sum += all::bitcast[f32](histo_4D_weights_buffer.load_i32_host(i));
+        i++;
+    } 
+
+    let inv_norm = 1.0 as f32 / sum;
+
+    //Compute CDF
+    i = 0;
+    sum = 0.0 as f32;
+    while i < full_res {
+        sum += all::bitcast[f32](histo_4D_weights_buffer.load_i32_host(i)) * inv_norm;
+        histo_4D_cdf_buffer.store_i32_host(i, all::bitcast[i32](sum));
+        i++;
+    }
+
+    let coord = @|bin_idx: i32| -> (Vec2, Vec2){
+
+        let mut bin_id = bin_idx;
+
+        let dir_u_bin = bin_id % res_u_dir;
+        bin_id /= res_u_dir;
+        let dir_v_bin = bin_id % res_v_dir;
+        bin_id /= res_v_dir;
+
+        let pos_u_bin = bin_id % res_u_pos;
+        let pos_v_bin = bin_id / res_v_pos;
+
+        let pos_min = Vec2{ x = pos_u_bin as f32 / res_u_pos as f32, y = pos_v_bin as f32 / res_v_pos as f32};
+        let dir_min = Vec2{ x = dir_u_bin as f32 / res_u_dir as f32, y = dir_v_bin as f32 / res_v_dir as f32};
+
+        (pos_min, dir_min)
+    };
+
+    let sample_discrete = @|id:i32, u:f32, p:Vec2, d:Vec2| {
+        let off = all::min(interval::binary_search(full_res, @|i:i32| histo_4D_cdf_buffer.load_f32(i) <= u), full_res - 1);
+        let pdf = inv_norm * histo_4D_weights_buffer.load_f32(off) * full_res as f32;
+        let (pos_bin, dir_bin) = coord(off);
+
+        DiscreteSample4d{
+            pos = all::make_vec2(pos_bin.x + p.x * inv_res_u_pos, pos_bin.y + p.y * inv_res_v_pos),
+            dir = all::make_vec2(dir_bin.x + d.x * inv_res_u_dir, dir_bin.y + d.y * inv_res_v_dir),
+            pdf = pdf,
+            pos_bin = pos_bin,
+            dir_bin = dir_bin
+        }
+    };
+
+    Histo4D{
+        func_size = full_res,
+        sample_discrete = sample_discrete
+    }
+
+}
+}

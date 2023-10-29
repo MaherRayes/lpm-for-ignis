@@ -1,0 +1,119 @@
+struct Atomics {
+    add_global_i32: fn (&mut i32, i32) -> i32,
+    add_global_f32: fn (&mut f32, f32) -> f32,
+    min_global_i32: fn (&mut i32, i32) -> i32,
+    max_global_i32: fn (&mut i32, i32) -> i32,
+    add_shared_i32: fn (&mut addrspace(3)i32, i32) -> i32,
+    add_shared_f32: fn (&mut addrspace(3)f32, f32) -> f32
+}
+
+fn @gpu_make_null_atomics() = Atomics {
+    add_global_i32 = @ |_, _| 0,
+    add_global_f32 = @ |_, _| 0,
+    min_global_i32 = @ |_, _| 0,
+    max_global_i32 = @ |_, _| 0,
+    add_shared_i32 = @ |_, _| 0,
+    add_shared_f32 = @ |_, _| 0,
+};
+
+// Simple ranged for
+fn @gpu_exec_1d(acc: Accelerator, dim: i32, block_size: i32, body: fn (WorkItem) -> ()) {
+    // Helper function that deduces the appropriate grid size that is at least larger
+    // or equal to `dim`x1x1, and that is a multiple of the block size.
+    let grid  = (round_up(dim, block_size), 1, 1);
+    let block = (block_size, 1, 1);
+    acc.exec(body)(grid, block);
+}
+
+// Based on https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf with a single warp
+fn @gpu_reduce[T](acc: Accelerator, n: i32, block_size: i32, elem: fn (i32) -> T, op: fn (T, T) -> T, result: fn (T) -> ()) -> () {
+    if n <= 0 { return() }
+
+    fn @down2_unroll(body: fn(i32) -> ()) {
+        fn @(?beg & ?end) loop(end: i32, beg: i32) -> () {
+            if end > beg {
+                @body(end);
+                loop(end >> 1, beg)
+            }
+        }
+        loop
+    }
+
+    if n < block_size {
+        // Not worth pulling out the complex algorithm...
+        let grid  = (block_size, 1, 1);
+        let block = (block_size, 1, 1);
+        for work_item in acc.exec(grid, block) {
+            let shared = reserve_shared[T](block_size);
+            let tid    = work_item.tidx();
+            if tid < n {
+                shared(tid) = @elem(tid);
+            }
+            acc.barrier();
+            
+            for s in down2_unroll(n >> 1, 0) {
+                if tid < s {
+                    shared(tid) = @op(shared(tid), shared(tid + s));
+                }
+                acc.barrier();
+            }
+
+            if tid == 0 { result(shared(0)); } 
+        }
+    } else {
+        let grid  = (block_size, 1, 1);
+        let block = (block_size, 1, 1);
+        for work_item in acc.exec(grid, block) {
+            let shared = reserve_shared[T](block_size);
+            let tid    = work_item.tidx();
+
+            let mut sum = @elem(tid);
+            for i in range_step(tid + block_size, n, block_size) {
+                sum = @op(sum, @elem(i));
+            }
+            shared(tid) = sum;
+            acc.barrier();
+
+            for s in down2_unroll(block_size >> 1, 0) {
+                if tid < s {
+                    shared(tid) = @op(shared(tid), shared(tid + s));
+                }
+                acc.barrier();
+            }
+
+            if tid == 0 { result(shared(0)); } 
+        }
+    }
+}
+
+// Swizzling based on https://developer.nvidia.com/blog/optimizing-compute-shaders-for-l2-locality-using-thread-group-id-swizzling/
+fn @gpu_swizzle_2d_id(tile_width: i32, work_item: WorkItem) -> (i32, i32) {
+    let dim   = (work_item.nblkx(), work_item.nblky()); // Also called CTA
+    let block = (work_item.bdimx(), work_item.bdimy());
+
+    let tiles         = dim.0 / tile_width;
+    let cta_per_tiles = dim.1 * tile_width;
+
+    let all_cta = tiles * tile_width * dim.1;
+
+    let flat_block_id = work_item.bidy() * dim.0 + work_item.bidx();
+    let cta_id        = flat_block_id / cta_per_tiles;
+    let local_cta_id  = flat_block_id % cta_per_tiles;
+
+    let (l_x, l_y) = if (all_cta <= flat_block_id) {
+        let last_x = dim.0 % tile_width;
+        (local_cta_id % last_x, local_cta_id / last_x)
+    } else {
+        (local_cta_id % tile_width, local_cta_id / tile_width)
+    };
+
+    let sw_cta_id = cta_id * tile_width + l_y * dim.0 + l_x;
+
+    let sw_b_x = sw_cta_id % dim.0;
+    let sw_b_y = sw_cta_id / dim.0;
+
+    let sw_t_x = block.0 * sw_b_x + work_item.tidx();
+    let sw_t_y = block.1 * sw_b_y + work_item.tidy();
+
+    (sw_t_x, sw_t_y)
+}
